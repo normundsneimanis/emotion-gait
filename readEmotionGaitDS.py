@@ -6,6 +6,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from matplotlib import animation
 import random
 import argparse
+import numpy as np
 
 emotionLabels = ("happy", "angry", "neutral", "sad")
 
@@ -110,7 +111,7 @@ if __name__ == '__main__':
                 sys.exit(1)
             gaitEntryNum = int(args.view_gait_num)
         elif args.save_dir:
-            gaitEntryNum = gaitEntryNum + 1
+            gaitEntryNum = random.randint(0, len(inputGaitFile.keys())-1)
         else:
             gaitEntryNum = random.randint(0, len(inputGaitFile.keys())-1)
         # Get the data
@@ -143,20 +144,42 @@ if __name__ == '__main__':
         for frame in list(data):
             #print("Frame contains %d data entries" % len(frame))
             points = []
+            diffs = [0, 0, 0]
             for prt in range(0, 16):
-                if list(frame)[prt * 3] > xmax:
-                    xmax = list(frame)[prt * 3]
-                if list(frame)[prt * 3] < xmin:
-                    xmin = list(frame)[prt * 3]
-                if list(frame)[prt * 3 + 1] > ymax:
-                    ymax = list(frame)[prt * 3 + 1]
-                if list(frame)[prt * 3 + 1] < ymin:
-                    ymin = list(frame)[prt * 3 + 1]
-                if list(frame)[prt * 3 + 2] > zmax:
-                    zmax = list(frame)[prt * 3 + 2]
-                if list(frame)[prt * 3 + 2] < zmin:
-                    zmin = list(frame)[prt * 3 + 2]
-                points.append(Point(list(frame)[prt * 3: prt * 3 + 3]))
+                # Center the body around spine joint
+                if prt == 0:
+                    if not any(np.isclose(list(frame)[0:3], [1e-10, 1e-10, 1e-10])):
+                        diffs = np.subtract([0, 0, 0], list(frame)[0:3])
+
+                point = Point(np.add(list(frame)[prt * 3: prt * 3 + 3], diffs))
+                points.append(point)
+
+                # Find frame limits so movement does not go out of border
+                if point.x > xmax:
+                    xmax = point.x
+                if point.x < xmin:
+                    xmin = point.x
+                if point.y > ymax:
+                    ymax = point.y
+                if point.y < ymin:
+                    ymin = point.y
+                if point.z > zmax:
+                    zmax = point.z
+                if point.z < zmin:
+                    zmin = point.z
+                # Prevent "fat" figure in case movement is in small area
+                if xmin > -0.6:
+                    xmin = -0.6
+                if xmax < 0.6:
+                    xmax = 0.6
+                if ymin > -0.6:
+                    ymin = -0.6
+                if ymax < 0.6:
+                    ymax = 0.6
+                if zmin > -0.6:
+                    zmin = -0.6
+                if zmax < 0.6:
+                    zmax = 0.6
 
             entryFrames.append(points)
 
