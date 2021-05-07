@@ -31,3 +31,65 @@ Dataset is available for download for training online [online](http://nneimanis.
 
 ## Runing training script
 Training script emotion-gait.py can be executed on [Google Colab](https://colab.research.google.com/drive/1QuZP5JA2TmSBc-JgAXzJ45_xjWFiNLs-?usp=sharing)
+
+
+#### Dependencies
+
+	pip.exe install tensorflow
+	pip.exe install tensorboardX
+	pip.exe install pywin32
+	pip.exe install future
+	conda install ffmpeg
+	conda install h5py
+
+#### HPC
+Set conda environment
+
+	conda activate conda_env
+
+Show queue
+
+	showq -r
+	
+Submit task
+
+	qsub -N normunds_neimanis ./start.sh
+
+View task status
+
+	qstat
+	
+Delete task
+
+	qdel <task_id>
+	
+Check job
+
+	checkjob -vvv <task_id>
+
+Connect to node runnign task (from `showq -r`)
+
+	ssh wn57
+	
+View resource utilization
+
+	htop 
+	dstat 
+	nvidia-smi 
+	iostat  
+	nfsstat
+	
+
+Conda environment creation commands
+
+	conda create -n normunds_env python=<version>
+	conda install pytorch torchvision cudatoolkit h5py tqdm tensorflow
+	conda env remove -n ENV_NAME
+	conda create --clone py35 --name py35-2
+
+
+View Tensorboard results
+
+	tensorboard.exe --logdir=C:\workspace\emotion-gait\artefacts\seq_default\
+
+
