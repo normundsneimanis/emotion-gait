@@ -39,6 +39,7 @@ Training script emotion-gait.py can be executed on [Google Colab](https://colab.
 	pip.exe install tensorboardX
 	pip.exe install pywin32
 	pip.exe install future
+	pip.exe install moviepy
 	conda install ffmpeg
 	conda install h5py
 
@@ -50,6 +51,8 @@ Set conda environment
 Show queue
 
 	showq -r
+	
+	qstat -r
 	
 Submit task
 

@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from matplotlib import animation
+import numpy as np
 import math
 from scipy.spatial.transform import Rotation as R
 
@@ -50,6 +51,17 @@ class VisualizeGait:
     def __init__(self, return_video=False):
         self.returnVideo = return_video
         pass
+
+    @staticmethod
+    def fig2data(fig):
+        # function to convert matplotlib fig to numpy
+        # draw the renderer
+        fig.canvas.draw()
+
+        # Get the RGB buffer from the figure
+        data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        return data
 
     @staticmethod
     def connection(f, t, points):
@@ -148,7 +160,7 @@ class VisualizeGait:
                                            interval=50, blit=False)
 
         if self.returnVideo:
-            # HTML5 video doesn't work with tensorboard
+            # https://github.com/pytorch/pytorch/issues/33226
             return line_ani.to_html5_video()
         else:
             plt.show()

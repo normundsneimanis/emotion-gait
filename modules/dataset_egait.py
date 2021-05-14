@@ -21,6 +21,7 @@ class DatasetEGait(torch.utils.data.Dataset):
     train_gaits = []
     test_gaits = []
     path = 'emotion-gait'
+    labelsCount = []
 
     def __init__(self, is_train, dataset_files,
                  remove_zeromove=False,
@@ -218,6 +219,7 @@ class DatasetEGait(torch.utils.data.Dataset):
         timeDiff = (datetime.datetime.utcnow() - startTime).total_seconds()
         print("Done in %.1f seconds. Train len: %d. Test len: %d." % (timeDiff, len(DatasetEGait.train_gaits), len(DatasetEGait.test_gaits)))
         print("Labels count: " + str(labelsCount))
+        DatasetEGait.labelsCount = labelsCount
         if self.equalize:
             labelsCount = [0, 0, 0, 0]
             for i in range(len(labels)):
