@@ -17,7 +17,7 @@ import datetime
 import copy
 from modules.dataset_egait import *
 from modules.models import *
-from modules.tensorboard_utils import CustomSummaryWriter
+
 
 modelSaveFile = 'model.pt'
 
@@ -25,7 +25,10 @@ modelsMap = {
     "ModelRNN": ModelRNN,
     "Model-P-LSTM": ModelLSTM,
     "Transformer": Transformer,
-    "SotaLSTM": ModelSotaLSTM
+    "SotaLSTM": ModelSotaLSTM,
+    "ModelRNN-LayerNorm": ModelRNNLayerNorm,
+    "Model-P-LSTM-LayerNorm": ModelLSTMLayerNorm,
+    "SotaLSTM-LayerNorm": ModelSotaLSTMLayerNorm,
 }
 
 parser = argparse.ArgumentParser(add_help=False)
@@ -53,9 +56,6 @@ parser.add_argument('--rotate-y', action='store_true',
                     help="Randomly rotate features around Y axis")
 parser.add_argument('--scale', action='store_true',
                     help="Randomly scale features making picture 'bigger' or 'smaller'")
-# TODO remove
-parser.add_argument('--equalize', action='store_true',
-                    help="Copy required gaits so all emotions are equally covered")
 parser.add_argument('--drop-elmd-frames', action='store_true',
                     help="Drop every 2nd frame from ELMD dataset so movement speed looks more in line with STEP dataset")
 parser.add_argument('--normalize-gait-sizes', action='store_true',
@@ -66,12 +66,28 @@ parser.add_argument('--hidden-size', default=256, type=int)
 parser.add_argument('--save-epoch-gait-video', action='store_true',
                     help="Save one random video to from train epoch to tensorboard results.")
 parser.add_argument('--cuda-device-num', default=-1, type=int)
+parser.add_argument('--save-best', action='store_true',
+                    help="Save best results in tensorboard")
+parser.add_argument('--overfit-exit-percent', default=0, type=int,
+                    help="Set percent of epochs. 0 to disable")
+parser.add_argument('--regularization-lambda', default=1e-4, type=float,
+                    help="Lambda, regularization coefficient. Start with L1:1e-5 L2:1e-3 L3:1e-5")
+# Model-P-LSTM-LayerNorm: L3: 1e-7
+# SotaLSTM w/ layernorm: L1: 1e-7, L2: 1e-4 L3: 1e-7
+parser.add_argument('--regularization-alpha', default=0.95, type=float,
+                    help="Elastic Net alpha term. Range [0-1] between L1 and L2.")
+parser.add_argument('--regularization-l', default=0, type=int, choices=[0, 1, 2, 3],
+                    help="Regularization. 0 - off, 1 - Lasso, 2 - Ridge, 3 - Elastic Net.")
 
 
 if 'COLAB_GPU' in os.environ:
     args = parser.parse_args(args=[])
 else:
     args = parser.parse_args()
+
+if args.regularization_l == 3 and (args.regularization_lambda > 1.0 or args.regularization_lambda < 0.0):
+    print("Error: --regularization-lambda cannot be >1.0 for --regularization-l 3 (Elastic Net). Exiting")
+    exit(1)
 
 random.seed()
 
@@ -80,16 +96,19 @@ random.seed()
 # model = Model()
 modelCallback = modelsMap[args.model]
 
+
 if args.save_artefacts:
     total_start_time = datetime.datetime.utcnow()
 
     from modules.file_utils import *
     import modules.dict_to_obj
     from modules.csv_utils_2 import *
+    from modules.tensorboard_utils import *
 
     path_sequence = f'./results/{args.sequence_name}'
     path_run = f'./results/{args.sequence_name}/{args.run_name}'
     path_artefacts = f'./artefacts/{args.sequence_name}/{args.run_name}'
+    path_artefacts_best = f'./artefacts/{args.sequence_name}/{args.run_name}-best'
     FileUtils.createDir(path_run)
     FileUtils.createDir(path_artefacts)
     FileUtils.writeJSON(f'{path_run}/args.json', args.__dict__)
@@ -100,6 +119,10 @@ if args.save_artefacts:
     summary_writer = CustomSummaryWriter(
         logdir=path_artefacts
     )
+    if args.save_best:
+        best_writer = CustomSummaryWriter(
+            logdir=path_artefacts_best
+        )
     print("Initialized tensorboard summary writer")
     args_save = copy.deepcopy(args.__dict__)
     args_save['dataset-features'] = " ".join(args.dataset_features)
@@ -112,7 +135,6 @@ data_loader_train = torch.utils.data.DataLoader(
                          center_root=args.center_root,
                          rotate_y=args.rotate_y,
                          scale=args.scale,
-                         equalize=args.equalize,
                          drop_elmd_frames=args.drop_elmd_frames,
                          normalize_gait_sizes=args.normalize_gait_sizes
                          ),
@@ -128,7 +150,6 @@ data_loader_test = torch.utils.data.DataLoader(
                          center_root=args.center_root,
                          rotate_y=args.rotate_y,
                          scale=args.scale,
-                         equalize=args.equalize,
                          drop_elmd_frames=args.drop_elmd_frames,
                          normalize_gait_sizes=args.normalize_gait_sizes
                          ),
@@ -170,7 +191,9 @@ for stage in ['train', 'test']:
     for metric in [
         'loss',
         'acc',
-        'time'
+        'time',
+        'lp1',
+        'lp2',
     ]:
         metrics[f'{stage}_{metric}'] = []
 
@@ -213,8 +236,10 @@ for epoch in range(1, args.epochs + 1):
                 idxes = torch.argsort(lengths, descending=True)
                 lengths = lengths[idxes]
                 max_len = int(lengths.max())
-                x = x[idxes, :max_len]
+                x = x[idxes, :max_len]  # (Batch, Seq, Features)
                 y_idx = y_idx[idxes]
+                lengths2 = torch.ones(len(y_idx)).type(torch.int64)
+                y_packed = pack_padded_sequence(y_idx.view(64, 1, 1), lengths2, batch_first=True)
 
             y_prim = model.forward(x, lengths)
 
@@ -226,13 +251,29 @@ for epoch in range(1, args.epochs + 1):
                 y_idx_prim = np.argmax(np_y, axis=1)
             else:
                 idxes = torch.arange(x.size(0)).to(args.device)
-                loss = -torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx])
+
+                regularization_term = torch.tensor(0., requires_grad=True).to(args.device)
+                if args.regularization_l:
+                    for param in model.parameters():
+                        if args.regularization_l == 3:  # Elastic Net
+                            regularization_term += ((1.0 - args.regularization_alpha) *
+                                                    torch.norm(param, p=1) +
+                                                    args.regularization_alpha * torch.norm(param, p=2))
+                        else:  # L1 or L2
+                            regularization_term += torch.norm(param, p=args.regularization_l)
+
+                loss1 = (-torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx])).cpu().item()
+                loss2 = (args.regularization_lambda * regularization_term).cpu().item()
+                loss = (-torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx]) +
+                        args.regularization_lambda * regularization_term)
                 # loss = -torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8))  # Loss without weights
                 y_idx_prim = torch.argmax(y_prim, dim=1)
 
             acc = torch.mean((y_idx == y_idx_prim) * 1.0)
             # ?? (TP + TN)/TD
             # acc2 = (np.count_nonzero((y_idx == y_idx_prim).cpu()) + np.count_nonzero((y_idx != y_idx_prim).cpu())) / len(y_idx)
+            metrics_epoch[f'{stage}_lp1'].append(loss1)
+            metrics_epoch[f'{stage}_lp2'].append(loss2)
             metrics_epoch[f'{stage}_loss'].append(loss.cpu().item())
             metrics_epoch[f'{stage}_acc'].append(acc.cpu().item())
             metrics_epoch[f'{stage}_time'].append((datetime.datetime.utcnow() - start_time).total_seconds())
@@ -273,43 +314,9 @@ for epoch in range(1, args.epochs + 1):
         testLossWorseCount += 1
 
     if args.save_artefacts:
-        summary_writer.add_scalar(
-            tag='train_loss',
-            scalar_value=np.mean(metrics_epoch['train_loss']),
-            global_step=epoch
-        )
-
-        summary_writer.add_scalar(
-            tag='train_acc',
-            scalar_value=np.mean(metrics_epoch['train_acc']),
-            global_step=epoch
-        )
-
-        summary_writer.add_scalar(
-            tag='best_test_loss',
-            scalar_value=best_metrics['best_test_loss'],
-            global_step=epoch
-        )
-
-        summary_writer.add_scalar(
-            tag='best_train_loss',
-            scalar_value=best_metrics['best_train_loss'],
-            global_step=epoch
-        )
-
-        summary_writer.add_hparams(
-            hparam_dict=args_save,
-            metric_dict={
-                'train_loss': np.mean(metrics_epoch['train_loss']),
-                'train_acc': np.mean(metrics_epoch['train_acc']),
-                'test_loss': np.mean(metrics_epoch['test_loss']),
-                'test_acc': np.mean(metrics_epoch['test_acc']),
-                'train_time': np.mean(metrics_epoch['train_time']),
-                'test_time': np.mean(metrics_epoch['test_time']),
-            },
-            name=args.run_name,
-            global_step=epoch
-        )
+        save_tensorboard(summary_writer, epoch, metrics_epoch, best_metrics, args_save, args.run_name)
+        if args.save_best and (testLossWorseCount == 0 or testAccWorseCount == 0):
+            save_tensorboard(best_writer, epoch, metrics_epoch, best_metrics, args_save, args.run_name)
 
     fig, axs = plt.subplots(3, figsize=(6, 10), gridspec_kw={'height_ratios': [1, 1, 2]})
     fig.suptitle('Loss & Accuracy over epochs')
@@ -321,12 +328,12 @@ for epoch in range(1, args.epochs + 1):
 
     class_count = 4
     for key, value in metrics.items():
-        if 'time' in key:
-            continue
         if 'loss' in key:
             plts += axs[0].plot(value, f'C{c}', label=key)
-        else:
+        elif 'acc' in key:
             plts += axs[1].plot(value, f'C{c}', label=key)
+        else:
+            continue
         c += 1
     axs[0].set(ylabel='loss')
     axs[1].set(xlabel='epoch', ylabel='acc')
@@ -370,6 +377,12 @@ for epoch in range(1, args.epochs + 1):
             figure=fig,
             global_step=epoch
         )
+        if args.save_best and (testLossWorseCount == 0 or testAccWorseCount == 0):
+            best_writer.add_figure(
+                tag='charts',
+                figure=fig,
+                global_step=epoch
+            )
 
         if args.save_epoch_gait_video and epoch % 10 == 0:
             # TODO Save animation in tensorboard.
@@ -392,16 +405,23 @@ for epoch in range(1, args.epochs + 1):
         # )
 
         summary_writer.flush()
+        if args.save_best:
+            best_writer.flush()
     else:
         plt.draw()
         plt.pause(.001)
 
-    if args.epochs >=200 and (testAccWorseCount >= args.epochs/20 or testLossWorseCount >= args.epochs/20):
+    if args.overfit_exit_percent > 0 and \
+            (args.epochs >= 200 and
+             (testAccWorseCount >= args.epochs/args.overfit_exit_percent or
+              testLossWorseCount >= args.epochs/args.overfit_exit_percent)):
         print("Exiting because overfitting has been detected")
         break
 
 
 if args.save_artefacts:
     summary_writer.close()
+    if args.save_best:
+        best_writer.close()
 
 print("Total run time: %.1f minutes" % (float(((datetime.datetime.utcnow() - total_start_time).total_seconds())) / 60.0))

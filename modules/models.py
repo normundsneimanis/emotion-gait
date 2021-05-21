@@ -4,6 +4,7 @@ from torch.nn.utils.rnn import pad_packed_sequence, PackedSequence, pack_padded_
 import numpy as np  # For Transformer
 import torch.nn.functional as F  # For SotaLSTM
 
+
 class ModelRNN(torch.nn.Module):
     def __init__(self, hidden_size, lstm_layers, device):
         super().__init__()
@@ -13,9 +14,6 @@ class ModelRNN(torch.nn.Module):
             in_features=48,
             out_features=hidden_size
         )
-
-        # TODO LayerNorms
-        # self.norm_1 = torch.nn.LayerNorm(normalized_shape=hidden_size)
 
         self.lstm = torch.nn.LSTM(
             input_size=hidden_size,
@@ -38,6 +36,51 @@ class ModelRNN(torch.nn.Module):
         h_mean = torch.mean(hidden, dim=1).squeeze()
         # h_max = torch.amax(hidden, dim=1).squeeze()
         h_max = torch.max(hidden, dim=1).values.squeeze()
+        h_cat = torch.cat((h_max, h_mean), axis=1)
+        logits = self.ff_class.forward(h_cat)
+        y_prim = torch.softmax(logits, dim=1)
+        return y_prim
+
+
+class ModelRNNLayerNorm(torch.nn.Module):
+    def __init__(self, hidden_size, lstm_layers, device):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        self.ff_1 = torch.nn.Linear(
+            in_features=48,
+            out_features=hidden_size
+        )
+
+        self.norm_1 = torch.nn.LayerNorm(normalized_shape=hidden_size)
+
+        self.lstm = torch.nn.LSTM(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            num_layers=lstm_layers,
+            batch_first=True
+        )
+
+        self.norm_2 = torch.nn.LayerNorm(normalized_shape=hidden_size)
+
+        self.ff_class = torch.nn.Linear(
+            in_features=2*hidden_size,
+            out_features=4
+        )
+
+    def forward(self, x, len):
+        x_flat = self.ff_1.forward(x)
+        x_norm = self.norm_1.forward(x_flat)
+        cudnn_fmt = torch.nn.utils.rnn.PackedSequence(x_norm, len)
+        hidden, cells = self.lstm.forward(cudnn_fmt[0])
+
+        hidden = hidden.data
+
+        hidden_norm = self.norm_2.forward(hidden)
+
+        h_mean = torch.mean(hidden_norm, dim=1).squeeze()
+        # h_max = torch.amax(hidden_norm, dim=1).squeeze()
+        h_max = torch.max(hidden_norm, dim=1).values.squeeze()
         h_cat = torch.cat((h_max, h_mean), axis=1)
         logits = self.ff_class.forward(h_cat)
         y_prim = torch.softmax(logits, dim=1)
@@ -200,6 +243,59 @@ class ModelLSTM(torch.nn.Module):
         # return y_prim
 
 
+class ModelLSTMLayerNorm(torch.nn.Module):
+    def __init__(self, hidden_size, lstm_layers, device):
+        super().__init__()
+        self.hiddenSize = hidden_size
+        self.lstmLayers = lstm_layers
+        self.device = device
+
+        self.ff = torch.nn.Linear(
+            in_features=48,
+            out_features=self.hiddenSize
+        )
+
+        self.norm_1 = torch.nn.LayerNorm(normalized_shape=hidden_size)
+
+        layers = []
+        for _ in range(self.lstmLayers):
+            layers.append(PhasedLSTM(
+                input_size=self.hiddenSize,
+                hidden_size=self.hiddenSize,
+                device=self.device
+            ))
+        self.lstm = torch.nn.Sequential(*layers)
+
+        self.norm_2 = torch.nn.LayerNorm(normalized_shape=hidden_size)
+
+        self.fc = torch.nn.Linear(
+            in_features=self.hiddenSize,
+            out_features=4
+        )
+
+    def forward(self, x, len):
+        x_flat = self.ff.forward(x)
+        x_norm = self.norm_1.forward(x_flat)
+        cudnn_fmt = torch.nn.utils.rnn.PackedSequence(x_norm, len)
+        hidden = self.lstm.forward(cudnn_fmt[0])
+
+        hidden = hidden.data
+        hidden_norm = self.norm_2.forward(hidden)
+
+        z_2 = torch.mean(hidden_norm, dim=1).squeeze()  # B, Hidden_size
+        logits = self.fc.forward(z_2)
+        y_prim = torch.softmax(logits, dim=1)
+        return y_prim
+
+        # # B, Seq, F => B, 28, 28
+        # z_0 = self.ff.forward(x)
+        # z_1 = self.lstm.forward(z_0)  # B, Seq, Hidden_size
+        # z_2 = torch.mean(z_1, dim=1).squeeze()  # B, Hidden_size
+        # logits = self.fc.forward(z_2)
+        # y_prim = torch.softmax(logits, dim=1)
+        # return y_prim
+
+
 class TransformerLayer(torch.nn.Module):
     def __init__(self, hidden_size, device, dropout=0.1, transformer_heads=4):
         super().__init__()
@@ -288,7 +384,7 @@ class Transformer(torch.nn.Module):
         )
 
         self.fc = torch.nn.Linear(in_features=self.hiddenSize, out_features=self.hiddenSize)
-        self.fc2 = torch.nn.Linear(in_features=self.hiddenSize, out_features=4)
+        # self.fc2 = torch.nn.Linear(in_features=self.hiddenSize, out_features=4)
 
     def forward(self, x, len):
         x = pack_padded_sequence(x, len, batch_first=True)
@@ -312,7 +408,7 @@ class Transformer(torch.nn.Module):
              z, lengths, atten = layer.forward(z, lengths, atten)
 
         z_packed = pack_padded_sequence(z, lengths, batch_first=True)
-        y_prim_logits = self.fc.forward(z_packed.data) @ self.project_w_e.weight.t()
+        y_prim_logits = self.fc.forward(z_packed.data) @ self.project_w_e.weight.t()  # @ self.fc2.forward(self.project_w_e.weight).t()
         # y_prim_logits = self.fc2.forward(y_prim_logits1.view(-1,self.hiddenSize))
         y_prim = torch.softmax(y_prim_logits, dim=1)
 
@@ -461,6 +557,61 @@ class ModelSotaLSTM(torch.nn.Module):
         # attenion
         z_1 = torch.stack(z_1_layers, dim=1)  # (B, Layers, Seq, Features)
         z_1 = torch.mean(z_1, dim=1)  # (B, Seq, Features)
+
+        z_2 = torch.mean(z_1, dim=1).squeeze()  # (B, Features) Temporal pooling (Attention)
+        logits = self.fc.forward(z_2)
+        y_prim = torch.softmax(logits, dim=1)
+        return y_prim
+
+
+class ModelSotaLSTMLayerNorm(torch.nn.Module):
+    def __init__(self, hidden_size, lstm_layers, device):
+        super().__init__()
+        self.hiddenSize = hidden_size
+        self.numLayers = lstm_layers
+        self.device = device
+
+        self.ff = torch.nn.Linear(
+            in_features=48,
+            out_features=self.hiddenSize
+        )
+
+        self.norm_1 = torch.nn.LayerNorm(normalized_shape=hidden_size)
+
+        layers = []
+        for _ in range(self.numLayers):
+            layers.append(SotaLSTM(
+                input_size=self.hiddenSize,
+                hidden_size=self.hiddenSize,
+            ))
+        self.lstm = torch.nn.Sequential(*layers)
+
+        self.norm_2 = torch.nn.LayerNorm(normalized_shape=hidden_size)
+
+        self.fc = torch.nn.Linear(
+            in_features=self.hiddenSize,
+            out_features=4
+        )
+
+    def forward(self, x, len):
+        # B, Seq, F => B, 28, 28
+        z_0 = self.ff.forward(x)
+
+        z_0_n = self.norm_1.forward(z_0)
+
+        z_1_layers = []
+        for i in range(self.numLayers):
+            z_1_layers.append(self.lstm[i].forward(z_0_n))
+            z_0_n = z_1_layers[-1]  # + z_0
+
+        # densnet => concat
+        # resnet => sum
+        # attenion
+
+
+        z_1 = torch.stack(z_1_layers, dim=1)  # (B, Layers, Seq, Features)
+        z_1_norm = self.norm_2.forward(z_1)
+        z_1 = torch.mean(z_1_norm, dim=1)  # (B, Seq, Features)
 
         z_2 = torch.mean(z_1, dim=1).squeeze()  # (B, Features) Temporal pooling (Attention)
         logits = self.fc.forward(z_2)

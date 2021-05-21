@@ -28,7 +28,6 @@ class DatasetEGait(torch.utils.data.Dataset):
                  center_root=False,
                  rotate_y=False,
                  scale=False,
-                 equalize=False,
                  drop_elmd_frames=False,
                  normalize_gait_sizes=False):
         self.is_train = is_train
@@ -40,7 +39,6 @@ class DatasetEGait(torch.utils.data.Dataset):
         self.center_root = center_root
         self.rotate_y = rotate_y
         self.scale = scale
-        self.equalize = equalize
         self.drop_elmd_frames = drop_elmd_frames
         self.normalize_gait_sizes = normalize_gait_sizes
 
@@ -181,29 +179,6 @@ class DatasetEGait(torch.utils.data.Dataset):
                 labelsEmotionsIds[inputLabelFile[gaitName][()]].append(len(lengths) - 1)
             print("Labels count for file " + file + ": " + str(labelsCountFile))
 
-        if self.equalize:
-            len1 = len(labelsEmotionsIds[1]) - 1
-            while len(labelsEmotionsIds[0]) > len(labelsEmotionsIds[1]):
-                rand = random.randint(0, len1)
-                gaits.append(gaits[labelsEmotionsIds[1][rand]])
-                lengths.append(lengths[labelsEmotionsIds[1][rand]])
-                labels.append(labels[labelsEmotionsIds[1][rand]])
-                labelsEmotionsIds[1].append(labels[labelsEmotionsIds[1][rand]])
-            len2 = len(labelsEmotionsIds[2]) - 1
-            while len(labelsEmotionsIds[0]) > len(labelsEmotionsIds[2]):
-                rand = random.randint(0, len2)
-                gaits.append(gaits[labelsEmotionsIds[2][rand]])
-                lengths.append(lengths[labelsEmotionsIds[2][rand]])
-                labels.append(labels[labelsEmotionsIds[2][rand]])
-                labelsEmotionsIds[2].append(labels[labelsEmotionsIds[2][rand]])
-            len3 = len(labelsEmotionsIds[3]) - 1
-            while len(labelsEmotionsIds[0]) > len(labelsEmotionsIds[3]):
-                rand = random.randint(0, len3)
-                gaits.append(gaits[labelsEmotionsIds[3][rand]])
-                lengths.append(lengths[labelsEmotionsIds[3][rand]])
-                labels.append(labels[labelsEmotionsIds[3][rand]])
-                labelsEmotionsIds[3].append(labels[labelsEmotionsIds[3][rand]])
-
         DatasetEGait.gaits = np.array(gaits).astype(np.float32)
         DatasetEGait.lengths = np.array(lengths).astype(np.int64)
         DatasetEGait.labels = np.array(labels).astype(np.int64)
@@ -220,11 +195,6 @@ class DatasetEGait(torch.utils.data.Dataset):
         print("Done in %.1f seconds. Train len: %d. Test len: %d." % (timeDiff, len(DatasetEGait.train_gaits), len(DatasetEGait.test_gaits)))
         print("Labels count: " + str(labelsCount))
         DatasetEGait.labelsCount = labelsCount
-        if self.equalize:
-            labelsCount = [0, 0, 0, 0]
-            for i in range(len(labels)):
-                labelsCount[labels[i]] += 1
-            print("Labels count after eq: " + str(labelsCount))
 
         DatasetEGait.loaded = 1
 

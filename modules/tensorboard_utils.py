@@ -1,5 +1,6 @@
 from tensorboardX import SummaryWriter
 from tensorboardX.summary import hparams
+import numpy as np
 
 
 class CustomSummaryWriter(SummaryWriter):
@@ -20,3 +21,43 @@ class CustomSummaryWriter(SummaryWriter):
         self.file_writer.add_summary(sei)
         for k, v in metric_dict.items():
             self.add_scalar(k, v, global_step)
+
+
+def save_tensorboard(writer, epoch, metrics_epoch, best_metrics, args_save, run_name):
+    writer.add_scalar(
+        tag='train_loss',
+        scalar_value=np.mean(metrics_epoch['train_loss']),
+        global_step=epoch
+    )
+
+    writer.add_scalar(
+        tag='train_acc',
+        scalar_value=np.mean(metrics_epoch['train_acc']),
+        global_step=epoch
+    )
+
+    writer.add_scalar(
+        tag='best_test_loss',
+        scalar_value=best_metrics['best_test_loss'],
+        global_step=epoch
+    )
+
+    writer.add_scalar(
+        tag='best_train_loss',
+        scalar_value=best_metrics['best_train_loss'],
+        global_step=epoch
+    )
+
+    writer.add_hparams(
+        hparam_dict=args_save,
+        metric_dict={
+            'train_loss': np.mean(metrics_epoch['train_loss']),
+            'train_acc': np.mean(metrics_epoch['train_acc']),
+            'test_loss': np.mean(metrics_epoch['test_loss']),
+            'test_acc': np.mean(metrics_epoch['test_acc']),
+            'train_time': np.mean(metrics_epoch['train_time']),
+            'test_time': np.mean(metrics_epoch['test_time']),
+        },
+        name=run_name,
+        global_step=epoch
+    )
