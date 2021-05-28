@@ -197,7 +197,7 @@ class PhasedLSTM(torch.nn.Module):
 
 
 class ModelLSTM(torch.nn.Module):
-    def __init__(self, hidden_size, lstm_layers, device):
+    def __init__(self, hidden_size, lstm_layers, device, alpha, tau_max, r_on):
         super().__init__()
         self.hiddenSize = hidden_size
         self.lstmLayers = lstm_layers
@@ -213,7 +213,10 @@ class ModelLSTM(torch.nn.Module):
             layers.append(PhasedLSTM(
                 input_size=self.hiddenSize,
                 hidden_size=self.hiddenSize,
-                device=self.device
+                device=self.device,
+                alpha=alpha,
+                tau_max=tau_max,
+                r_on=r_on
             ))
         self.lstm = torch.nn.Sequential(*layers)
 
@@ -244,7 +247,7 @@ class ModelLSTM(torch.nn.Module):
 
 
 class ModelLSTMLayerNorm(torch.nn.Module):
-    def __init__(self, hidden_size, lstm_layers, device):
+    def __init__(self, hidden_size, lstm_layers, device, alpha, tau_max, r_on):
         super().__init__()
         self.hiddenSize = hidden_size
         self.lstmLayers = lstm_layers
@@ -262,7 +265,10 @@ class ModelLSTMLayerNorm(torch.nn.Module):
             layers.append(PhasedLSTM(
                 input_size=self.hiddenSize,
                 hidden_size=self.hiddenSize,
-                device=self.device
+                device=self.device,
+                alpha=alpha,
+                tau_max=tau_max,
+                r_on=r_on
             ))
         self.lstm = torch.nn.Sequential(*layers)
 
@@ -297,7 +303,7 @@ class ModelLSTMLayerNorm(torch.nn.Module):
 
 
 class TransformerLayer(torch.nn.Module):
-    def __init__(self, hidden_size, device, dropout=0.1, transformer_heads=4):
+    def __init__(self, hidden_size, device, dropout, transformer_heads):
         super().__init__()
         self.hiddenSize = hidden_size
         self.dropout = dropout
@@ -364,11 +370,13 @@ class TransformerLayer(torch.nn.Module):
 
 
 class Transformer(torch.nn.Module):
-    def __init__(self, hidden_size, lstm_layers, device):
+    def __init__(self, hidden_size, lstm_layers, device, dropout=0.1, transformer_heads=4):
         super().__init__()
         self.hiddenSize = hidden_size
         self.numLayers = lstm_layers
         self.device = device
+        self.dropout = dropout
+        self.transformer_heads = transformer_heads
 
         self.project_w_e = torch.nn.Embedding(
             num_embeddings=48,  # dataset_full.max_classes_tokens
@@ -380,11 +388,11 @@ class Transformer(torch.nn.Module):
         )
 
         self.transformer = torch.nn.ModuleList(
-            [TransformerLayer(hidden_size=self.hiddenSize, device=device) for _ in range(self.numLayers)]
+            [TransformerLayer(hidden_size=self.hiddenSize, device=device, dropout=self.dropout,
+                              transformer_heads=self.transformer_heads) for _ in range(self.numLayers)]
         )
 
-        self.fc = torch.nn.Linear(in_features=self.hiddenSize, out_features=self.hiddenSize)
-        # self.fc2 = torch.nn.Linear(in_features=self.hiddenSize, out_features=4)
+        self.fc = torch.nn.Linear(in_features=self.hiddenSize, out_features=4)
 
     def forward(self, x, len):
         x = pack_padded_sequence(x, len, batch_first=True)
@@ -407,19 +415,10 @@ class Transformer(torch.nn.Module):
         for layer in self.transformer:
              z, lengths, atten = layer.forward(z, lengths, atten)
 
-        z_packed = pack_padded_sequence(z, lengths, batch_first=True)
-        y_prim_logits = self.fc.forward(z_packed.data) @ self.project_w_e.weight.t()  # @ self.fc2.forward(self.project_w_e.weight).t()
-        # y_prim_logits = self.fc2.forward(y_prim_logits1.view(-1,self.hiddenSize))
-        y_prim = torch.softmax(y_prim_logits, dim=1)
-
+        z_2 = torch.mean(z, dim=1).squeeze()  # B, Hidden_size
+        logits = self.fc.forward(z_2)
+        y_prim = torch.softmax(logits, dim=1)
         return y_prim
-        # y_prim_packed = PackedSequence(
-        #     data=y_prim,
-        #     batch_sizes=x.batch_sizes,
-        #     sorted_indices=x.sorted_indices
-        # )
-        #
-        # return y_prim_packed, atten
 
 
 class SotaLSTM(torch.nn.Module):
@@ -449,8 +448,6 @@ class SotaLSTM(torch.nn.Module):
         self.layer_norm_c = torch.nn.LayerNorm(
                 hidden_size
         )
-
-        # self.layer_norm_1 = torch.nn.GroupNorm(num_groups=3, num_channels=self.hidden_size*3)
 
         self.b = torch.nn.Parameter(
             torch.FloatTensor(4 * hidden_size).zero_()
@@ -603,11 +600,6 @@ class ModelSotaLSTMLayerNorm(torch.nn.Module):
         for i in range(self.numLayers):
             z_1_layers.append(self.lstm[i].forward(z_0_n))
             z_0_n = z_1_layers[-1]  # + z_0
-
-        # densnet => concat
-        # resnet => sum
-        # attenion
-
 
         z_1 = torch.stack(z_1_layers, dim=1)  # (B, Layers, Seq, Features)
         z_1_norm = self.norm_2.forward(z_1)

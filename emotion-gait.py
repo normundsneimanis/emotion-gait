@@ -62,9 +62,8 @@ parser.add_argument('--normalize-gait-sizes', action='store_true',
                     help="Normalize sizes so that all feature sizes are the same")
 parser.add_argument('--model', default="ModelRNN", type=str, choices=modelsMap.keys())
 parser.add_argument('--hidden-size', default=256, type=int)
-# TODO low priority task
 parser.add_argument('--save-epoch-gait-video', action='store_true',
-                    help="Save one random video to from train epoch to tensorboard results.")
+                    help="Save one random video to from train epoch to results.")
 parser.add_argument('--cuda-device-num', default=-1, type=int)
 parser.add_argument('--save-best', action='store_true',
                     help="Save best results in tensorboard")
@@ -78,6 +77,12 @@ parser.add_argument('--regularization-alpha', default=0.95, type=float,
                     help="Elastic Net alpha term. Range [0-1] between L1 and L2.")
 parser.add_argument('--regularization-l', default=0, type=int, choices=[0, 1, 2, 3],
                     help="Regularization. 0 - off, 1 - Lasso, 2 - Ridge, 3 - Elastic Net.")
+parser.add_argument('--p-lstm-alpha', default=1e-3, type=float,
+                    help="Leak rate is active in the closed phase, and plays a similar role as the leak in a "
+                         "parametric 'leaky' rectified linear unit")
+parser.add_argument('--p-lstm-tau-max', default=3.0, type=float,
+                    help="Phase period Tau controls the real-time period of the oscillation")
+parser.add_argument('--p-lstm-r-on', default=5e-2, type=float, help="Ratio of the open period to the total period Tau")
 
 
 if 'COLAB_GPU' in os.environ:
@@ -170,7 +175,11 @@ if torch.cuda.is_available() and args.use_cuda:
 else:
     args.device = 'cpu'
 
-model = modelCallback(hidden_size=args.hidden_size, lstm_layers=args.lstm_layers, device=args.device)
+if args.model == 'Model-P-LSTM' or args.model == 'Model-P-LSTM-LayerNorm':
+    model = modelCallback(hidden_size=args.hidden_size, lstm_layers=args.lstm_layers, device=args.device,
+                          alpha=args.p_lstm_alpha, tau_max=args.p_lstm_tau_max, r_on=args.p_lstm_r_on)
+else:
+    model = modelCallback(hidden_size=args.hidden_size, lstm_layers=args.lstm_layers, device=args.device)
 
 model.to(args.device)
 
@@ -239,35 +248,28 @@ for epoch in range(1, args.epochs + 1):
                 x = x[idxes, :max_len]  # (Batch, Seq, Features)
                 y_idx = y_idx[idxes]
                 lengths2 = torch.ones(len(y_idx)).type(torch.int64)
-                y_packed = pack_padded_sequence(y_idx.view(64, 1, 1), lengths2, batch_first=True)
+                y_packed = pack_padded_sequence(y_idx.view(args.batch_size, 1, 1), lengths2, batch_first=True)
 
             y_prim = model.forward(x, lengths)
 
-            if args.model == 'Transformer':
-                # weights = torch.from_numpy(dataset_full.weights[torch.argmax(y_prim.data, dim=1).cpu().numpy()])
-                # weights = weights.unsqueeze(dim=1).to(DEVICE)
-                loss = -torch.mean(y_packed.data * torch.log(y_prim.data + 1e-8))
-                np_y = y_packed.data.cpu().data.numpy()
-                y_idx_prim = np.argmax(np_y, axis=1)
-            else:
-                idxes = torch.arange(x.size(0)).to(args.device)
+            idxes = torch.arange(x.size(0)).to(args.device)
 
-                regularization_term = torch.tensor(0., requires_grad=True).to(args.device)
-                if args.regularization_l:
-                    for param in model.parameters():
-                        if args.regularization_l == 3:  # Elastic Net
-                            regularization_term += ((1.0 - args.regularization_alpha) *
-                                                    torch.norm(param, p=1) +
-                                                    args.regularization_alpha * torch.norm(param, p=2))
-                        else:  # L1 or L2
-                            regularization_term += torch.norm(param, p=args.regularization_l)
+            regularization_term = torch.tensor(0., requires_grad=True).to(args.device)
+            if args.regularization_l:
+                for param in model.parameters():
+                    if args.regularization_l == 3:  # Elastic Net
+                        regularization_term += ((1.0 - args.regularization_alpha) *
+                                                torch.norm(param, p=1) +
+                                                args.regularization_alpha * torch.norm(param, p=2))
+                    else:  # L1 or L2
+                        regularization_term += torch.norm(param, p=args.regularization_l)
 
-                loss1 = (-torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx])).cpu().item()
-                loss2 = (args.regularization_lambda * regularization_term).cpu().item()
-                loss = (-torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx]) +
-                        args.regularization_lambda * regularization_term)
-                # loss = -torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8))  # Loss without weights
-                y_idx_prim = torch.argmax(y_prim, dim=1)
+            loss1 = (-torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx])).cpu().item()
+            loss2 = (args.regularization_lambda * regularization_term).cpu().item()
+            loss = (-torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx]) +
+                    args.regularization_lambda * regularization_term)
+            # loss = -torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8))  # Loss without weights
+            y_idx_prim = torch.argmax(y_prim, dim=1)
 
             acc = torch.mean((y_idx == y_idx_prim) * 1.0)
             # ?? (TP + TN)/TD
