@@ -17,18 +17,14 @@ import datetime
 import copy
 from modules.dataset_egait import *
 from modules.models import *
+from sklearn.metrics import f1_score
 
-
-modelSaveFile = 'model.pt'
 
 modelsMap = {
     "ModelRNN": ModelRNN,
     "Model-P-LSTM": ModelLSTM,
     "Transformer": Transformer,
     "SotaLSTM": ModelSotaLSTM,
-    "ModelRNN-LayerNorm": ModelRNNLayerNorm,
-    "Model-P-LSTM-LayerNorm": ModelLSTMLayerNorm,
-    "SotaLSTM-LayerNorm": ModelSotaLSTMLayerNorm,
 }
 
 parser = argparse.ArgumentParser(add_help=False)
@@ -83,6 +79,12 @@ parser.add_argument('--p-lstm-alpha', default=1e-3, type=float,
 parser.add_argument('--p-lstm-tau-max', default=3.0, type=float,
                     help="Phase period Tau controls the real-time period of the oscillation")
 parser.add_argument('--p-lstm-r-on', default=5e-2, type=float, help="Ratio of the open period to the total period Tau")
+parser.add_argument('--loss', default="wce", type=str, choices=["wce", "acc", "dice", "focal"],
+                    help="Loss function: Weighted Cross Entropy, Accuracy or Dice loss")
+parser.add_argument('--layernorm', action='store_true',
+                    help="Use layer normalization")
+parser.add_argument('--memmap', action='store_true',
+                    help="Use memmap for storing dataset")
 
 
 if 'COLAB_GPU' in os.environ:
@@ -141,7 +143,8 @@ data_loader_train = torch.utils.data.DataLoader(
                          rotate_y=args.rotate_y,
                          scale=args.scale,
                          drop_elmd_frames=args.drop_elmd_frames,
-                         normalize_gait_sizes=args.normalize_gait_sizes
+                         normalize_gait_sizes=args.normalize_gait_sizes,
+                         memmap=args.memmap
                          ),
     batch_size=args.batch_size,
     shuffle=True,
@@ -156,7 +159,8 @@ data_loader_test = torch.utils.data.DataLoader(
                          rotate_y=args.rotate_y,
                          scale=args.scale,
                          drop_elmd_frames=args.drop_elmd_frames,
-                         normalize_gait_sizes=args.normalize_gait_sizes
+                         normalize_gait_sizes=args.normalize_gait_sizes,
+                         memmap=args.memmap
                          ),
     batch_size=args.batch_size,
     shuffle=False,
@@ -175,11 +179,13 @@ if torch.cuda.is_available() and args.use_cuda:
 else:
     args.device = 'cpu'
 
-if args.model == 'Model-P-LSTM' or args.model == 'Model-P-LSTM-LayerNorm':
+if args.model == 'Model-P-LSTM':
     model = modelCallback(hidden_size=args.hidden_size, lstm_layers=args.lstm_layers, device=args.device,
-                          alpha=args.p_lstm_alpha, tau_max=args.p_lstm_tau_max, r_on=args.p_lstm_r_on)
+                          alpha=args.p_lstm_alpha, tau_max=args.p_lstm_tau_max, r_on=args.p_lstm_r_on,
+                          layernorm=args.layernorm)
 else:
-    model = modelCallback(hidden_size=args.hidden_size, lstm_layers=args.lstm_layers, device=args.device)
+    model = modelCallback(hidden_size=args.hidden_size, lstm_layers=args.lstm_layers, device=args.device,
+                          layernorm=args.layernorm)
 
 model.to(args.device)
 
@@ -202,7 +208,8 @@ for stage in ['train', 'test']:
         'acc',
         'time',
         'lp1',
-        'lp2',
+        'reg',
+        'f1score'
     ]:
         metrics[f'{stage}_{metric}'] = []
 
@@ -211,6 +218,7 @@ best_metrics = {
     'best_test_loss': 1e20,
     'best_train_acc': 0,
     'best_test_acc': 0,
+    'best_f1': 0,
 }
 testAccWorseCount = 0
 testLossWorseCount = 0
@@ -264,20 +272,33 @@ for epoch in range(1, args.epochs + 1):
                     else:  # L1 or L2
                         regularization_term += torch.norm(param, p=args.regularization_l)
 
-            loss1 = (-torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx])).cpu().item()
-            loss2 = (args.regularization_lambda * regularization_term).cpu().item()
-            loss = (-torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx]) +
-                    args.regularization_lambda * regularization_term)
-            # loss = -torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8))  # Loss without weights
-            y_idx_prim = torch.argmax(y_prim, dim=1)
+            # Regularization term
+            loss_reg = (args.regularization_lambda * regularization_term)
 
+            # Loss function
+            if args.loss == "acc":  # Binary cross entropy
+                loss1 = -torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8))  # Loss without weights
+            elif args.loss == "wce":  # Weighted cross entropy
+                loss1 = (-torch.mean(torch.log(y_prim[idxes, y_idx] + 1e-8) * class_weights[y_idx]))
+            elif args.loss == "dice":
+                loss1 = torch.mean(2 * (y_idx * y_prim[idxes, y_idx] + 1e-8) / (y_idx + y_prim[idxes, y_idx] + 1e-8))
+            elif args.loss == "focal":
+                gamma = 0.
+                loss1 = torch.mean(-1 * (1-(y_prim[idxes, y_idx] + 1e-8))**gamma * torch.log(y_prim[idxes, y_idx] + 1e-8))
+
+            # Combine loss with regularization term, if set
+            loss = loss1 + loss_reg
+
+            # Calculate accuracy and f-score
+            y_idx_prim = torch.argmax(y_prim, dim=1)
             acc = torch.mean((y_idx == y_idx_prim) * 1.0)
-            # ?? (TP + TN)/TD
+            f1score = f1_score(y_idx.to('cpu'), y_idx_prim.to('cpu'), average='micro', zero_division=0)
             # acc2 = (np.count_nonzero((y_idx == y_idx_prim).cpu()) + np.count_nonzero((y_idx != y_idx_prim).cpu())) / len(y_idx)
-            metrics_epoch[f'{stage}_lp1'].append(loss1)
-            metrics_epoch[f'{stage}_lp2'].append(loss2)
+            metrics_epoch[f'{stage}_lp1'].append(loss1.cpu().item())
+            metrics_epoch[f'{stage}_reg'].append(loss_reg.cpu().item())
             metrics_epoch[f'{stage}_loss'].append(loss.cpu().item())
             metrics_epoch[f'{stage}_acc'].append(acc.cpu().item())
+            metrics_epoch[f'{stage}_f1score'].append(f1score.item())
             metrics_epoch[f'{stage}_time'].append((datetime.datetime.utcnow() - start_time).total_seconds())
 
             # y = torch.softmax(torch.randn((32, class_count)), dim=1)
@@ -302,6 +323,8 @@ for epoch in range(1, args.epochs + 1):
 
     if np.mean(metrics_epoch['train_acc']) > best_metrics['best_train_acc']:
         best_metrics['best_train_acc'] = np.mean(metrics_epoch['train_acc'])
+    if np.mean(metrics_epoch['test_f1score']) > best_metrics['best_f1']:
+        best_metrics['best_f1'] = np.mean(metrics_epoch['test_f1score'])
     if np.mean(metrics_epoch['test_acc']) > best_metrics['best_test_acc']:
         best_metrics['best_test_acc'] = np.mean(metrics_epoch['test_acc'])
         testAccWorseCount = 0
@@ -369,6 +392,7 @@ for epoch in range(1, args.epochs + 1):
                 'train_acc': np.mean(metrics_epoch['train_acc']),
                 'test_loss': np.mean(metrics_epoch['test_loss']),
                 'test_acc': np.mean(metrics_epoch['test_acc']),
+                'test_f1': np.mean(metrics_epoch['test_f1score']),
                 **best_metrics
             },  # contains train + test metrics + best metrics
             epoch
@@ -387,24 +411,9 @@ for epoch in range(1, args.epochs + 1):
             )
 
         if args.save_epoch_gait_video and epoch % 10 == 0:
-            # TODO Save animation in tensorboard.
             vis = VisualizeGait(return_video=True)
-            # vis.vizualize(gaitFrames, gaitName)
-            # summary_writer.add_video(
-            #     tag='gait',
-            #     vid_tensor=vis.vizualize(gaitFrames, gaitName),
-            #     global_step=epoch,
-            #     fps=25
-            # )
             with open(os.path.join(path_run, "%04d.html" % epoch), "w") as f:
                 print(vis.vizualize(gaitFrames, gaitName), file=f)
-
-        # summary_writer.add_embedding(
-        #     mat=embeddings,
-        #     metadata=classes.tolist(),
-        #     tag='embeddings',
-        #     global_step=epoch
-        # )
 
         summary_writer.flush()
         if args.save_best:

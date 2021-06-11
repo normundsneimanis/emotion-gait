@@ -11,6 +11,7 @@ import random
 # from scipy.ndimage.interpolation import rotate
 from scipy.spatial.transform import Rotation as R
 from modules.visualize_gait import *
+import time
 
 
 class DatasetEGait(torch.utils.data.Dataset):
@@ -29,7 +30,8 @@ class DatasetEGait(torch.utils.data.Dataset):
                  rotate_y=False,
                  scale=False,
                  drop_elmd_frames=False,
-                 normalize_gait_sizes=False):
+                 normalize_gait_sizes=False,
+                 memmap=False):
         self.is_train = is_train
         self.datasetFiles = []
         for i in range(len(dataset_files[0])):
@@ -41,14 +43,64 @@ class DatasetEGait(torch.utils.data.Dataset):
         self.scale = scale
         self.drop_elmd_frames = drop_elmd_frames
         self.normalize_gait_sizes = normalize_gait_sizes
+        self.memmap = memmap
 
         if not DatasetEGait.loaded:
-            self.loadDataSet()
+            if self.memmap and os.path.isfile(os.path.join(self.findMmapDir(), "emotion-gait.gaits.mmap")):
+                self.loadMemmapDataSet()
+                self.splitDataSet()
+            else:
+                self.loadDataSet()
+                self.splitDataSet()
 
         if is_train:
             self.gaitIds = DatasetEGait.train_gaits
         else:
             self.gaitIds = DatasetEGait.test_gaits
+
+    def loadMemmapDataSet(self):
+        mmapFileDone = os.path.join(self.findMmapDir(), "emotion-gait.done")
+        numChecks = 0
+        while not os.path.isfile(mmapFileDone):
+            numChecks += 1
+            if numChecks > 300:
+                print("Wait time for %s exceeded" % mmapFileDone)
+                sys.exit(2)
+            time.sleep(1)
+
+        totalGaits = self.getNumGaits()
+
+        mmapFileGaits = os.path.join(self.findMmapDir(), "emotion-gait.gaits.mmap")
+        DatasetEGait.gaits = np.memmap(
+            mmapFileGaits,
+            mode='r+',
+            dtype=np.float32,
+            shape=(totalGaits, 240, 48)
+        )
+        mmapFileLengths = os.path.join(self.findMmapDir(), "emotion-gait.lengths.mmap")
+        DatasetEGait.lengths = np.memmap(
+            mmapFileLengths,
+            mode='r+',
+            dtype=np.int64,
+            shape=(totalGaits)
+        )
+        mmapFileLabels = os.path.join(self.findMmapDir(), "emotion-gait.labels.mmap")
+        DatasetEGait.labels = np.memmap(
+            mmapFileLabels,
+            mode='r+',
+            dtype=np.int64,
+            shape=(totalGaits)
+        )
+
+        DatasetEGait.loaded = 1
+
+    def getNumGaits(self):
+        totalGaits = 0
+        for file, labelsFile in self.datasetFiles:
+            inputGaitFile = DatasetEGait.openFile(os.path.join(DatasetEGait.path, file))
+            totalGaits += len(inputGaitFile.keys())
+            inputGaitFile.close()
+        return totalGaits
 
     def loadDataSet(self):
         print("Loading emotion-gait dataset")
@@ -57,11 +109,6 @@ class DatasetEGait(torch.utils.data.Dataset):
                          "000348", "000403", "000412", "000413", "001590", "001707", "001626", "001643",
                          "001666"  # no movement
                          ]
-        gaits = []
-        lengths = []
-        labels = []
-        labelsCount = [0, 0, 0, 0]
-        labelsEmotionsIds = [[], [], [], []]
 
         # Download dataset files if needed
         for file, labelsFile in self.datasetFiles:
@@ -90,6 +137,36 @@ class DatasetEGait(torch.utils.data.Dataset):
             timeDiffLoadSizes = (datetime.datetime.utcnow() - startTimeLoadSizes).total_seconds()
             print("mean spine height: %.2f, calculation done in %.1f seconds. " % (meanHeight, timeDiffLoadSizes))
 
+        if self.memmap:
+            # Count number of gaits so we can construct mmap file
+            totalGaits = self.getNumGaits()
+
+            mmapFileGaits = os.path.join(self.findMmapDir(), "emotion-gait.gaits.mmap")
+            gaits = np.memmap(
+                mmapFileGaits,
+                mode='w+',
+                dtype=np.float32,
+                shape=(totalGaits, 240, 48)
+            )
+            gaitNum = 0
+            mmapFileLengths = os.path.join(self.findMmapDir(), "emotion-gait.lengths.mmap")
+            lengths = np.memmap(
+                mmapFileLengths,
+                mode='w+',
+                dtype=np.int64,
+                shape=(totalGaits)
+            )
+            mmapFileLabels = os.path.join(self.findMmapDir(), "emotion-gait.labels.mmap")
+            labels = np.memmap(
+                mmapFileLabels,
+                mode='w+',
+                dtype=np.int64,
+                shape=(totalGaits)
+            )
+        else:
+            gaits = []
+            lengths = []
+            labels = []
 
         for file, labelsFile in self.datasetFiles:
             print("\tLoading %s" % file)
@@ -171,18 +248,39 @@ class DatasetEGait(torch.utils.data.Dataset):
                 #     vis = VisualizeGait()
                 #     vis.vizualize(newFrames, gaitName)
 
-                gaits.append(newFrames)
-                lengths.append(frameLen)
-                labels.append(inputLabelFile[gaitName][()])
-                labelsCount[inputLabelFile[gaitName][()]] += 1
+                if self.memmap:
+                    gaits[gaitNum] = np.array(newFrames).astype(np.float32)
+                    lengths[gaitNum] = frameLen
+                    labels[gaitNum] = inputLabelFile[gaitName][()]
+                    gaitNum += 1
+                else:
+                    gaits.append(newFrames)
+                    lengths.append(frameLen)
+                    labels.append(inputLabelFile[gaitName][()])
                 labelsCountFile[inputLabelFile[gaitName][()]] += 1
-                labelsEmotionsIds[inputLabelFile[gaitName][()]].append(len(lengths) - 1)
             print("Labels count for file " + file + ": " + str(labelsCountFile))
 
-        DatasetEGait.gaits = np.array(gaits).astype(np.float32)
-        DatasetEGait.lengths = np.array(lengths).astype(np.int64)
-        DatasetEGait.labels = np.array(labels).astype(np.int64)
+        if self.memmap:
+            DatasetEGait.gaits = gaits
+            DatasetEGait.gaits.flush()
+            DatasetEGait.lengths = lengths
+            DatasetEGait.lengths.flush()
+            DatasetEGait.labels = labels
+            DatasetEGait.labels.flush()
+            mmapFileDone = os.path.join(self.findMmapDir(), "emotion-gait.done")
+            with open(mmapFileDone, 'w') as f:
+                pass
+        else:
+            DatasetEGait.gaits = np.array(gaits).astype(np.float32)
+            DatasetEGait.lengths = np.array(lengths).astype(np.int64)
+            DatasetEGait.labels = np.array(labels).astype(np.int64)
 
+        timeDiff = (datetime.datetime.utcnow() - startTime).total_seconds()
+        print("Done in %.1f seconds." % timeDiff)
+
+        DatasetEGait.loaded = 1
+
+    def splitDataSet(self):
         # Split in test and train data
         print("Splitting in train and test parts")
         for i in range(len(DatasetEGait.gaits)):
@@ -191,12 +289,27 @@ class DatasetEGait(torch.utils.data.Dataset):
             else:
                 DatasetEGait.train_gaits.append(i)
 
-        timeDiff = (datetime.datetime.utcnow() - startTime).total_seconds()
-        print("Done in %.1f seconds. Train len: %d. Test len: %d." % (timeDiff, len(DatasetEGait.train_gaits), len(DatasetEGait.test_gaits)))
+        labelsCount = [0, 0, 0, 0]
+        for l in DatasetEGait.labels:
+            labelsCount[l] += 1
+
+        print("Train len: %d. Test len: %d." %
+              (len(DatasetEGait.train_gaits), len(DatasetEGait.test_gaits)))
         print("Labels count: " + str(labelsCount))
         DatasetEGait.labelsCount = labelsCount
 
-        DatasetEGait.loaded = 1
+    def findMmapDir(self):
+        dirs = [os.path.join(os.sep, "scratch", "nneimanis"), os.path.join(os.sep, "tmp")]
+        for d in dirs:
+            if os.path.isdir(d):
+                return d
+
+        raise Exception("Temporary directory not found in list: " + str(dirs))
+
+    def waitForMmap(self):
+        file = os.path.join(elf.findMmapDir(), "emotion-gait.gaits.mmap.done")
+        while not os.path.isfile(file):
+            time.sleep(1)
 
     def __len__(self):
         return len(self.gaitIds)
