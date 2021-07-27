@@ -12,9 +12,15 @@ import random
 from scipy.spatial.transform import Rotation as R
 from modules.visualize_gait import *
 import time
+from modules.compute_aff_features.compute_features import compute_features
+from modules.compute_aff_features.normalize_features import normalize_features
+from modules.compute_aff_features.cross_validate import cross_validate
 
 
 class DatasetEGait(torch.utils.data.Dataset):
+    save_videos = int(os.getenv("SAVE_VIDEOS", "0"))  # For augmentation comparison video creation
+    max_save_videos = int(os.getenv("MAX_SAVE_VIDEOS", "100"))  # What is maximum number of videos to save
+    saveGaitName = os.getenv("SAVE_GAIT_NAME", "")
     loaded = 0
     gaits = np.array([])
     lengths = np.array([])
@@ -23,6 +29,11 @@ class DatasetEGait(torch.utils.data.Dataset):
     test_gaits = []
     path = 'emotion-gait'
     labelsCount = []
+    startedFile = 'emotion-gait.started'
+    skiplist_ELMD = ["000412", "000413", "000422", "000423", "000734", "001367", "001590", "001666",  # jumps
+                     "000348", "000403", "000412", "000413", "001590", "001707", "001626", "001643",
+                     "001666"  # no movement
+                     ]
 
     def __init__(self, is_train, dataset_files,
                  remove_zeromove=False,
@@ -31,11 +42,16 @@ class DatasetEGait(torch.utils.data.Dataset):
                  scale=False,
                  drop_elmd_frames=False,
                  normalize_gait_sizes=False,
-                 memmap=False):
+                 memmap=False,
+                 memmap_only=False,
+                 affective_features=False):
         self.is_train = is_train
         self.datasetFiles = []
         for i in range(len(dataset_files[0])):
-            self.datasetFiles.append([dataset_files[0][i], dataset_files[1][i]])
+            if len(dataset_files[1]):
+                self.datasetFiles.append([dataset_files[0][i], dataset_files[1][i]])
+            else:
+                self.datasetFiles.append([dataset_files[0][i], None])
 
         self.remove_zeromove = remove_zeromove
         self.center_root = center_root
@@ -44,9 +60,14 @@ class DatasetEGait(torch.utils.data.Dataset):
         self.drop_elmd_frames = drop_elmd_frames
         self.normalize_gait_sizes = normalize_gait_sizes
         self.memmap = memmap
+        self.memmap_only = memmap_only
+        self.affective_features = affective_features
+
+        if self.memmap_only:
+            self.memmap = True
 
         if not DatasetEGait.loaded:
-            if self.memmap and os.path.isfile(os.path.join(self.findMmapDir(), "emotion-gait.gaits.mmap")):
+            if self.memmap and os.path.isfile(os.path.join(self.findMmapDir(), self.startedFile)) and not self.memmap_only:
                 self.loadMemmapDataSet()
                 self.splitDataSet()
             else:
@@ -61,6 +82,8 @@ class DatasetEGait(torch.utils.data.Dataset):
     def loadMemmapDataSet(self):
         mmapFileDone = os.path.join(self.findMmapDir(), "emotion-gait.done")
         numChecks = 0
+        if not os.path.isfile(mmapFileDone):
+            print("Waiting for mmap file to be done ...")
         while not os.path.isfile(mmapFileDone):
             numChecks += 1
             if numChecks > 300:
@@ -99,16 +122,19 @@ class DatasetEGait(torch.utils.data.Dataset):
         for file, labelsFile in self.datasetFiles:
             inputGaitFile = DatasetEGait.openFile(os.path.join(DatasetEGait.path, file))
             totalGaits += len(inputGaitFile.keys())
+            if 'ELMD' in file:
+                totalGaits -= len(self.skiplist_ELMD)
             inputGaitFile.close()
-        return totalGaits
+        self.totalGaits = totalGaits
+        return self.totalGaits
 
     def loadDataSet(self):
         print("Loading emotion-gait dataset")
         startTime = datetime.datetime.utcnow()
-        skiplist_ELMD = ["000412", "000413", "000422", "000423", "000734", "001367", "001590", "001666",  # jumps
-                         "000348", "000403", "000412", "000413", "001590", "001707", "001626", "001643",
-                         "001666"  # no movement
-                         ]
+
+        if self.memmap:
+            with open(os.path.join(self.findMmapDir(), self.startedFile), 'w') as f:
+                pass
 
         # Download dataset files if needed
         for file, labelsFile in self.datasetFiles:
@@ -137,6 +163,7 @@ class DatasetEGait(torch.utils.data.Dataset):
             timeDiffLoadSizes = (datetime.datetime.utcnow() - startTimeLoadSizes).total_seconds()
             print("mean spine height: %.2f, calculation done in %.1f seconds. " % (meanHeight, timeDiffLoadSizes))
 
+        gaitNum = 0
         if self.memmap:
             # Count number of gaits so we can construct mmap file
             totalGaits = self.getNumGaits()
@@ -148,7 +175,6 @@ class DatasetEGait(torch.utils.data.Dataset):
                 dtype=np.float32,
                 shape=(totalGaits, 240, 48)
             )
-            gaitNum = 0
             mmapFileLengths = os.path.join(self.findMmapDir(), "emotion-gait.lengths.mmap")
             lengths = np.memmap(
                 mmapFileLengths,
@@ -168,6 +194,10 @@ class DatasetEGait(torch.utils.data.Dataset):
             lengths = []
             labels = []
 
+        if self.affective_features:
+            features = []  # Affective features
+            time_step = 1.0 / 30.0
+
         for file, labelsFile in self.datasetFiles:
             print("\tLoading %s" % file)
             labelsCountFile = [0, 0, 0, 0]
@@ -178,11 +208,21 @@ class DatasetEGait(torch.utils.data.Dataset):
 
             prevFramePoints = []
             skippedFramesCount = 0
+            if self.save_videos and not os.path.isdir("gait-videos"):
+                os.mkdir("gait-videos")
             for gaitName in inputGaitFile.keys():
                 if 'ELMD' in file:
-                    if gaitName[:6] in skiplist_ELMD:
+                    if gaitName[:6] in self.skiplist_ELMD:
                         print("\t\tSkipping gait %s" % gaitName)
                         continue
+
+                vis = VisualizeGait(return_video=True)
+
+                if self.save_videos:
+                    if (self.saveGaitName and self.saveGaitName in gaitName) or (not self.saveGaitName and gaitNum % 10 == 0):
+                        if not os.path.isfile(os.path.join("gait-videos", f"{gaitName}-orig.html")):
+                            with open(os.path.join("gait-videos", f"{gaitName}-orig.html"), "w") as f:
+                                print(vis.vizualize(inputGaitFile[gaitName], gaitName), file=f)
 
                 newFrames = []
                 frames = inputGaitFile[gaitName]
@@ -190,7 +230,7 @@ class DatasetEGait(torch.utils.data.Dataset):
                 normalizatonScale = 0
                 for frame in list(frames):
                     frameNum += 1
-                    if 'ELMD' in file and self.drop_elmd_frames:
+                    if self.drop_elmd_frames and 'ELMD' in file:
                         if frameNum % 2 == 0:
                             continue
 
@@ -238,27 +278,109 @@ class DatasetEGait(torch.utils.data.Dataset):
                         modifiedFrames.append(p.z)
                     newFrames.append(modifiedFrames)
 
-                # zero pad frames so we have 240 frame for each gait
                 frameLen = len(newFrames)
-                while len(newFrames) < 240:
-                    newFrames.append(newFrames[len(newFrames)-1])
+                # pad frames so we have 240 frame for each gait
+                newFrames = np.pad(newFrames, ((0, 240 - len(newFrames)), (0, 0)))
+
+                # Save gait augmentations for visualization
+                if self.save_videos and (self.rotate_y or self.scale):
+                    gait = []
+                    if self.rotate_y:
+                        rotateAmount = random.randint(45, 325)
+                    else:
+                        rotateAmount = 0
+                    if self.scale:
+                        scaleAmount = random.randrange(50, 150) / 100
+                    else:
+                        scaleAmount = 1.0
+                    r = R.from_euler('y', rotateAmount, degrees=True).as_matrix().T
+
+                    frames = np.copy(newFrames)
+                    for frame in list(frames):
+                        gait.append(np.matmul(frame.reshape(-1, 3), r).flatten() * scaleAmount)
+                    newFrames = np.copy(gait)
+
+                if self.save_videos:
+                    if ((self.saveGaitName and self.saveGaitName in gaitName) or
+                            (not self.saveGaitName and gaitNum % 10 == 0)):
+                        fname = os.path.join("gait-videos", f"{gaitName}-%d-%d-%d-%d-%d.html" %
+                                             (self.remove_zeromove, self.center_root, self.rotate_y,
+                                              self.scale, self.normalize_gait_sizes))
+                        if not os.path.isfile(fname):
+                            with open(fname, "w") as f:
+                                print(vis.vizualize(newFrames, gaitName), file=f)
+                        # Exit when selected gait video has been saved
+                        if self.saveGaitName:
+                            sys.exit(0)
+                if self.save_videos and gaitNum / 10 > self.max_save_videos:
+                    sys.exit(0)
 
                 # if normalizatonScale:
                 #     print("normalizationScale: %.2f" % normalizatonScale)
                 #     vis = VisualizeGait()
                 #     vis.vizualize(newFrames, gaitName)
 
+                if inputLabelFile:
+                    label = inputLabelFile[gaitName][()]
+                else:
+                    if 'Angry' in gaitName:
+                        label = 0
+                    elif 'Happy' in gaitName:
+                        label = 1
+                    elif 'Neutral' in gaitName:
+                        label = 2
+                    elif 'Sad' in gaitName:
+                        label = 3
+                    else:
+                        print("Error: unrecognized emotion label from gait name [%s]" % gaitName)
+
                 if self.memmap:
+                    if gaitNum == self.totalGaits:
+                        print("Error: Gait num exceeded on gait: %s" % gaitName)
+                        break
                     gaits[gaitNum] = np.array(newFrames).astype(np.float32)
                     lengths[gaitNum] = frameLen
-                    labels[gaitNum] = inputLabelFile[gaitName][()]
-                    gaitNum += 1
+                    labels[gaitNum] = label
                 else:
                     gaits.append(newFrames)
                     lengths.append(frameLen)
-                    labels.append(inputLabelFile[gaitName][()])
-                labelsCountFile[inputLabelFile[gaitName][()]] += 1
+                    labels.append(label)
+
+                if self.affective_features:
+                    frames = np.array(newFrames)
+                    feature = []  # [label]
+                    if frames.ndim == 2:
+                        feature += compute_features(frames, time_step)
+                    else:
+                        feature += frames
+                    features.append(feature)
+
+                gaitNum += 1
+                if self.affective_features and gaitNum != len(features):
+                    print("Feature count does not match gait count")
+                labelsCountFile[label] += 1
             print("Labels count for file " + file + ": " + str(labelsCountFile))
+
+        if self.affective_features:
+            normalized_features = []
+            normalize_features(features, normalized_features)
+            # print("Gaits: %d, Normalized features: %d, Features: %d" % (len(gaits), len(normalized_features), len(features)))
+            # cross_validate(normalized_features, labels)
+            for num in range(0, len(gaits)):
+                if num == len(gaits) or num == len(normalized_features):
+                    print("Affective feature number of gaits exceeded")
+                if not self.memmap:
+                    gaits[num].append(np.pad(np.nan_to_num(normalized_features[num]), (0, 48 - len(normalized_features[num]))))
+                else:
+                    # print(
+                    #     "num: %d gait len: %d feature len: %d" % (num, len(gaits[num]), len(normalized_features[num])))
+                    if lengths[num] < 240:
+                        gaits[num][lengths[num]] = np.pad(np.nan_to_num(normalized_features[num]),
+                                                 (0, 48 - len(normalized_features[num])))
+                        lengths[num] = lengths[num] + 1
+                    else:
+                        gaits[num][239] = np.pad(np.nan_to_num(normalized_features[num]),
+                                                 (0, 48 - len(normalized_features[num])))
 
         if self.memmap:
             DatasetEGait.gaits = gaits
@@ -279,6 +401,9 @@ class DatasetEGait(torch.utils.data.Dataset):
         print("Done in %.1f seconds." % timeDiff)
 
         DatasetEGait.loaded = 1
+        if self.memmap_only:
+            print("Memmap files created. Exiting.")
+            sys.exit(0)
 
     def splitDataSet(self):
         # Split in test and train data
@@ -319,8 +444,14 @@ class DatasetEGait(torch.utils.data.Dataset):
         gaitId = self.gaitIds[idx]
         if self.rotate_y or self.scale:
             gait = []
-            rotateAmount = random.randint(45, 325)
-            scaleAmount = random.randrange(50, 150) / 100
+            if self.rotate_y:
+                rotateAmount = random.randint(45, 325)
+            else:
+                rotateAmount = 0
+            if self.scale:
+                scaleAmount = random.randrange(50, 150) / 100
+            else:
+                scaleAmount = 1.0
             r = R.from_euler('y', rotateAmount, degrees=True).as_matrix().T
 
             frames = np.copy(DatasetEGait.gaits[gaitId])

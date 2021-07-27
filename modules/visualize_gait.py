@@ -143,7 +143,9 @@ class VisualizeGait:
         if zmax < 0.6:
             zmax = 0.6
 
-        fig = plt.figure(figsize=(1024 / 96, 1024 / 96), dpi=96)
+        plt.close()
+        # fig = plt.figure(figsize=(1024 / 96, 1024 / 96), dpi=96)
+        fig = plt.figure(figsize=(200 / 96, 200 / 96), dpi=96)
         ax = fig.add_subplot(111, projection='3d', xlim=(xmin, xmax), ylim=(ymin, ymax), zlim=(zmin, zmax))
         ax.view_init(azim=69, elev=-69)
 

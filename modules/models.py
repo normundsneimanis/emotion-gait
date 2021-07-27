@@ -5,6 +5,54 @@ import numpy as np  # For Transformer
 import torch.nn.functional as F  # For SotaLSTM
 
 
+class ModelConvolutional(torch.nn.Module):
+    def __init__(self, hidden_size, lstm_layers, device, layernorm=False):
+        super().__init__()
+
+        self.conv1 = torch.nn.Conv1d(
+            in_channels=240,
+            out_channels=2,
+            kernel_size=3,
+            stride=2,
+            padding=1
+        )
+        n_out = self.get_n_out(240, 3, 2, 1)
+
+        self.conv2 = torch.nn.Conv1d(
+            in_channels=2,
+            out_channels=4,
+            kernel_size=3,
+            stride=2,
+            padding=1
+        )
+        n_out = self.get_n_out(n_out, 3, 2, 1)
+
+        self.conv3 = torch.nn.Conv1d(
+            in_channels=4,
+            out_channels=8,
+            kernel_size=3,
+            stride=2,
+            padding=1
+        )
+        n_out = self.get_n_out(n_out, 3, 2, 1)
+        self.fc = torch.nn.Linear(in_features=48, out_features=4)
+
+    def get_n_out(self, n_in, kernel_size, stride, padding):
+        return int((n_in + 2 * padding - kernel_size) / stride) + 1
+
+    def forward(self, x, len):
+        x_1 = self.conv1.forward(x)
+        x_2 = torch.nn.functional.relu(x_1)
+        x_3 = self.conv2.forward(x_2)
+        x_4 = torch.nn.functional.relu(x_3)
+        x_5 = self.conv3.forward(x_4)
+        x_6 = torch.nn.functional.relu(x_5)
+        x_7 = x_6.view((x.size(0), -1))  # (B, n_out*n_out*8)
+        x_8 = self.fc.forward(x_7)
+
+        return torch.nn.functional.softmax(x_8, dim=-1)
+
+
 class ModelRNN(torch.nn.Module):
     def __init__(self, hidden_size, lstm_layers, device, layernorm=False):
         super().__init__()
@@ -77,27 +125,27 @@ class PhasedLSTM(torch.nn.Module):
 
         self.W = torch.nn.Parameter(
             torch.FloatTensor(4 * input_size, 4 * hidden_size).uniform_(-stdv, stdv) # Test -1..1, default 0..1
-        )
+        ).to(self.device)
 
         self.U = torch.nn.Parameter(
             torch.FloatTensor(4 * input_size, 4 * hidden_size).uniform_(-stdv, stdv) # Test -1..1, default 0..1
-        )
+        ).to(self.device)
 
         self.b = torch.nn.Parameter(
             torch.FloatTensor(4 * hidden_size).zero_()
-        )
+        ).to(self.device)
 
         self.w_peep = torch.nn.Parameter(
             torch.FloatTensor(3 * hidden_size).uniform_(-stdv, stdv)
-        )
+        ).to(self.device)
 
         self.tau = torch.nn.Parameter(
             torch.FloatTensor(hidden_size).uniform_(0, tau_max).exp_()
-        )
+        ).to(self.device)
 
         self.shift = torch.nn.Parameter(
             torch.FloatTensor(hidden_size).uniform_(0, torch.mean(self.tau).item())
-        )
+        ).to(self.device)
 
     def forward(self, x, h_c=None):
         if h_c is None:
@@ -108,7 +156,7 @@ class PhasedLSTM(torch.nn.Module):
         h_out = []
         # cuda dnn
         # x => (B, Seq, F)
-        x_seq = x.permute(1, 0, 2)  # (Seq, B, F)
+        x_seq = x.permute(1, 0, 2).to(self.device)  # (Seq, B, F)
 
         seq_len = x_seq.size(0)
         times = torch.arange(seq_len).unsqueeze(dim=1)  # (Seq, 1)
@@ -162,7 +210,7 @@ class PhasedLSTM(torch.nn.Module):
 
 
 class ModelLSTM(torch.nn.Module):
-    def __init__(self, hidden_size, lstm_layers, device, alpha, tau_max, r_on, layernorm=False):
+    def __init__(self, hidden_size, lstm_layers, device, alpha=1e-3, tau_max=3.0, r_on=5e-2, layernorm=False):
         super().__init__()
         self.hiddenSize = hidden_size
         self.lstmLayers = lstm_layers

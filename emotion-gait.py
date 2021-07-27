@@ -17,6 +17,9 @@ import datetime
 import copy
 from modules.dataset_egait import *
 from modules.models import *
+from modules.model_transformer import *
+from modules.model_resnet import *
+from modules.loss_history import LossHistory
 from sklearn.metrics import f1_score
 
 
@@ -25,6 +28,15 @@ modelsMap = {
     "Model-P-LSTM": ModelLSTM,
     "Transformer": Transformer,
     "SotaLSTM": ModelSotaLSTM,
+    "ModelConvolutional": ModelConvolutional,
+    "Transformer2": Transformer2,
+    "ResNet16": ResNet16,
+    "ResNet36": ResNet36,
+    "ResNet16BN": ResNet16BN,
+    "ResNet36BN": ResNet36BN,
+    "ResNet54": ResNet54,
+    "ResNet100": ResNet100,
+    "ResNet150": ResNet150,
 }
 
 parser = argparse.ArgumentParser(add_help=False)
@@ -85,6 +97,15 @@ parser.add_argument('--layernorm', action='store_true',
                     help="Use layer normalization")
 parser.add_argument('--memmap', action='store_true',
                     help="Use memmap for storing dataset")
+parser.add_argument('--memmap-only', action='store_true')
+parser.add_argument('--transformer-heads', default=8, type=int,
+                    help="Number of Transformer heads")
+parser.add_argument('--transformer-depth', default=6, type=int,
+                    help="Number of Transformer heads")
+parser.add_argument('--transformer-embed-dim', default=64, type=int,
+                    help="Number of Transformer heads")
+parser.add_argument('--disable-early-exit', action='store_true')
+parser.add_argument('--affective-features', action='store_true')
 
 
 if 'COLAB_GPU' in os.environ:
@@ -96,13 +117,20 @@ if args.regularization_l == 3 and (args.regularization_lambda > 1.0 or args.regu
     print("Error: --regularization-lambda cannot be >1.0 for --regularization-l 3 (Elastic Net). Exiting")
     exit(1)
 
+if (args.dataset_features != ["features.h5", "features_ELMD.h5"] and
+        args.dataset_labels == ["labels.h5", "labels_ELMD.h5"]):
+    args.dataset_labels = []
+
+for n, i in enumerate(args.dataset_labels):
+    if i == 'None':
+        args.dataset_labels[n] = None
+
 random.seed()
 
 # Dynamically loading module won't check if such model exists
 # Model = getattr(__import__('modules_core.' + args.model, fromlist=['Model']), 'Model')
 # model = Model()
 modelCallback = modelsMap[args.model]
-
 
 if args.save_artefacts:
     total_start_time = datetime.datetime.utcnow()
@@ -144,7 +172,9 @@ data_loader_train = torch.utils.data.DataLoader(
                          scale=args.scale,
                          drop_elmd_frames=args.drop_elmd_frames,
                          normalize_gait_sizes=args.normalize_gait_sizes,
-                         memmap=args.memmap
+                         memmap=args.memmap,
+                         memmap_only=args.memmap_only,
+                         affective_features=args.affective_features,
                          ),
     batch_size=args.batch_size,
     shuffle=True,
@@ -160,7 +190,9 @@ data_loader_test = torch.utils.data.DataLoader(
                          scale=args.scale,
                          drop_elmd_frames=args.drop_elmd_frames,
                          normalize_gait_sizes=args.normalize_gait_sizes,
-                         memmap=args.memmap
+                         memmap=args.memmap,
+                         memmap_only=args.memmap_only,
+                         affective_features=args.affective_features
                          ),
     batch_size=args.batch_size,
     shuffle=False,
@@ -183,9 +215,22 @@ if args.model == 'Model-P-LSTM':
     model = modelCallback(hidden_size=args.hidden_size, lstm_layers=args.lstm_layers, device=args.device,
                           alpha=args.p_lstm_alpha, tau_max=args.p_lstm_tau_max, r_on=args.p_lstm_r_on,
                           layernorm=args.layernorm)
+elif args.model == 'Transformer2':
+    model = modelCallback(hidden_size=args.hidden_size, lstm_layers=args.lstm_layers, device=args.device,
+                          layernorm=args.layernorm, dim=args.transformer_embed_dim, depth=args.transformer_depth,
+                          heads=args.transformer_heads)
 else:
     model = modelCallback(hidden_size=args.hidden_size, lstm_layers=args.lstm_layers, device=args.device,
                           layernorm=args.layernorm)
+
+total_params = 0
+for parameter in model.parameters():
+    param_count = 1
+    for p in parameter.shape:
+        param_count *= p
+    total_params += param_count
+
+print("Number of params: %d" % total_params)
 
 model.to(args.device)
 
@@ -226,6 +271,8 @@ testLossWorseCount = 0
 # Class weights using Divison method
 class_weights = (0.5 / np.array(DatasetEGait.labelsCount)) * sum(DatasetEGait.labelsCount)
 class_weights = torch.tensor(class_weights).clone().detach().to(args.device)
+
+lossHistory = LossHistory()
 
 for epoch in range(1, args.epochs + 1):
     metrics_epoch = {key: [] for key in metrics.keys()}
@@ -293,7 +340,7 @@ for epoch in range(1, args.epochs + 1):
             y_idx_prim = torch.argmax(y_prim, dim=1)
             acc = torch.mean((y_idx == y_idx_prim) * 1.0)
             f1score = f1_score(y_idx.to('cpu'), y_idx_prim.to('cpu'), average='micro', zero_division=0)
-            # acc2 = (np.count_nonzero((y_idx == y_idx_prim).cpu()) + np.count_nonzero((y_idx != y_idx_prim).cpu())) / len(y_idx)
+
             metrics_epoch[f'{stage}_lp1'].append(loss1.cpu().item())
             metrics_epoch[f'{stage}_reg'].append(loss_reg.cpu().item())
             metrics_epoch[f'{stage}_loss'].append(loss.cpu().item())
@@ -301,7 +348,6 @@ for epoch in range(1, args.epochs + 1):
             metrics_epoch[f'{stage}_f1score'].append(f1score.item())
             metrics_epoch[f'{stage}_time'].append((datetime.datetime.utcnow() - start_time).total_seconds())
 
-            # y = torch.softmax(torch.randn((32, class_count)), dim=1)
             y_prim = torch.softmax(y_prim, dim=1).cpu()
             y_prim_idx = torch.argmax(y_prim, dim=1).data.numpy()
             for idx in range(y_idx.shape[0]):
@@ -321,6 +367,9 @@ for epoch in range(1, args.epochs + 1):
 
         print("epoch: %-3s stage: %-5s" % (epoch, stage), " ".join(metrics_strs))
 
+    lossHistory.addTrainLoss(np.mean(metrics_epoch['train_loss']))
+    lossHistory.addTestLoss(np.mean(metrics_epoch['test_loss']))
+    lossHistory.addTestAcc(np.mean(metrics_epoch['test_acc']))
     if np.mean(metrics_epoch['train_acc']) > best_metrics['best_train_acc']:
         best_metrics['best_train_acc'] = np.mean(metrics_epoch['train_acc'])
     if np.mean(metrics_epoch['test_f1score']) > best_metrics['best_f1']:
@@ -427,6 +476,10 @@ for epoch in range(1, args.epochs + 1):
              (testAccWorseCount >= args.epochs/args.overfit_exit_percent or
               testLossWorseCount >= args.epochs/args.overfit_exit_percent)):
         print("Exiting because overfitting has been detected")
+        break
+
+    if not args.disable_early_exit and epoch % 10 == 0 and lossHistory.diverging():
+        print("Exiting because loss is diverging")
         break
 
 
