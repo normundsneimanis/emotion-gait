@@ -1,10 +1,10 @@
-# Emotion Gait AI research project
+# Human gait emotion recognition deep learning research project
 Based on [STEP: Spatial Temporal Graph Convolutional Networks for Emotion Perception from Gaits](https://arxiv.org/abs/1910.12906v1)
 
 ## Dataset
 
 #### Get dataset
-Download original dataset  <https://go.umd.edu/emotion-gait>, [mirror](http://nneimanis.id.lv/emotion-gait/emotion-gait.zip)
+Download original dataset  <https://go.umd.edu/emotion-gait>, [mirror](http://nneimanis.id.lv/emotion-gait/)
 
 #### Reading, viewing dataset
 Dataset files containing gaits are
@@ -29,34 +29,48 @@ View animated dataset [online](http://nneimanis.id.lv/emotion-gait/index.php)
 
 Dataset is available for download for training online [online](http://nneimanis.id.lv/emotion-gait/emotion-gait.h5)
 
-## Runing training script
-Training script emotion-gait.py can be executed on [Google Colab](https://colab.research.google.com/drive/1QuZP5JA2TmSBc-JgAXzJ45_xjWFiNLs-?usp=sharing)
+## Running training script
+
+    python ./emotion-gait.py --learning-rate 1e-2 --batch-size 128 --hidden-size 256 --model SotaLSTM --remove-zeromove --center-root --normalize-gait-sizes --scale --save-artefacts --use-cuda --sequence-name params2 --epochs 5000 --save-best --overfit-exit-percent 30
 
 
 #### Dependencies
 
-	pip.exe install tensorflow
-	pip.exe install tensorboardX
-	pip.exe install pywin32
-	pip.exe install future
-	pip.exe install moviepy
-	conda install ffmpeg
-	conda install h5py
+Set up conda environment
+
+    conda create -n conda_env
+    conda activate conda_env
+    conda install -c anaconda mysql-connector-python
+    conda install pytorch==1.5.1 torchvision==0.6.1 cudatoolkit=10.1 -c pytorch
+    conda install h5py tqdm
+    conda install -c conda-forge python-dotenv
+    conda install -c anaconda requests
+
+    conda install -c conda-forge matplotlib
+    conda install -c anaconda mysql-python
+
+    conda install -c conda-forge scikit-learn 
+    conda install -c conda-forge tensorboardx
+    conda install -c conda-forge tensorboard
+    conda install -c conda-forge tensorflow
+    conda install -c conda-forge einops
+    pip3 install thop
+    pip3 install python_papi
+    sudo apt-get install papi-tools
 
 #### HPC
-Set conda environment
+Activate conda environment
 
 	conda activate conda_env
 
 Show queue
 
 	showq -r
-	
 	qstat -r
 	
 Submit task
 
-	qsub -N normunds_neimanis ./start.sh
+	qsub ./start.sh
 
 View task status
 
@@ -70,7 +84,7 @@ Check job
 
 	checkjob -vvv <task_id>
 
-Connect to node runnign task (from `showq -r`)
+Connect to node running task (from `showq -r`)
 
 	ssh wn57
 	
@@ -82,14 +96,6 @@ View resource utilization
 	iostat  
 	nfsstat
 	
-
-Conda environment creation commands
-
-	conda create -n normunds_env python=<version>
-	conda install pytorch torchvision cudatoolkit h5py tqdm tensorflow
-	conda env remove -n ENV_NAME
-	conda create --clone py35 --name py35-2
-
 
 View Tensorboard results
 
